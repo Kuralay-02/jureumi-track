@@ -1,7 +1,9 @@
 from collections import defaultdict
+import json
+import os
 
 import gspread
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 
@@ -10,8 +12,10 @@ API_TOKEN = "8620495714:AAGO07coxFdIQ8YbCrAEbBMw-KBp0FaHlRM"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# подключение к Google Sheets (по ссылке)
-gc = gspread.service_account(filename="creds.json")
+# 🔥 подключение к Google Sheets через Railway
+creds_dict = json.loads(os.environ["CREDS_JSON"])
+gc = gspread.service_account_from_dict(creds_dict)
+
 spreadsheet = gc.open_by_url("https://docs.google.com/spreadsheets/d/1rOSfytA_8YhPGSYbMCCk8lVTydhwQrRqXMkif3L00x0/edit?usp=sharing")
 
 sheet_kor = spreadsheet.worksheet("Корейские Разборы")
@@ -32,7 +36,7 @@ async def start(message: Message):
         reply_markup=keyboard
     )
 
-# нажатие кнопки
+# кнопка
 @dp.message_handler(lambda message: message.text == "🔍 Где мои разборы?")
 async def ask_username(message: Message):
     await message.answer("Отправь свой @username (например: @teplo)")
