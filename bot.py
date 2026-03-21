@@ -7,7 +7,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 
-API_TOKEN = "8620495714:AAGO07coxFdIQ8YbCrAEbBMw-KBp0FaHlRM"
+import os
+
+API_TOKEN = os.environ["BOT_TOKEN"]
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
