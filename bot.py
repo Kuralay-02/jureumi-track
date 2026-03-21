@@ -64,32 +64,32 @@ async def search_user(message: Message):
 
     result = "📦 Твои разборы:\n\n"
 
-   def format_block(title, rows):
-    if not rows:
-        return ""
+    def format_block(title, rows):
+        if not rows:
+            return ""
 
-    grouped = defaultdict(list)
+        grouped = defaultdict(list)
 
-    for row in rows:
-        grouped[row["Номер разбора"]].append(row)
+        for row in rows:
+            grouped[row["Номер разбора"]].append(row)
 
-    text_block = f"{title}\n────────────\n\n"
+        text_block = f"{title}\n────────────\n\n"
 
-    for box, items in grouped.items():
-        text_block += f"📦 {box}\n"
+        for box, items in grouped.items():
+            text_block += f"📦 {box}\n"
 
-        for item in items:
-            text_block += f"🛍 {item['Название позиции']}\n"
-            text_block += f"📍 Статус: {item['Статус']}\n"
+            for item in items:
+                text_block += f"🛍 {item['Название позиции']}\n"
+                text_block += f"📍 Статус: {item['Статус']}\n"
 
-            if item["Примечания"]:
-                text_block += f"💬 {item['Примечания']}\n"
+                if item["Примечания"]:
+                    text_block += f"💬 {item['Примечания']}\n"
 
-            text_block += "\n"
+                    text_block += "\n"
 
-        text_block += "────────────\n\n"
+            text_block += "────────────\n\n"
 
-    return text_block
+        return text_block
 
     result += format_block("🇰🇷 Корейские разборы\n", kor_rows)
     result += format_block("🇨🇳 Китайские разборы\n", kit_rows)
