@@ -59,7 +59,7 @@ async def search_user(message: Message):
     yap_rows = get_data(sheet_yap)
 
     if not (kor_rows or kit_rows or yap_rows):
-        await message.answer("Ничего не найдено 😢")
+        await message.answer(""😔 Ничего не найдено\n\nПроверь правильность username"")
         return
 
     result = "📦 Твои разборы:\n\n"
@@ -95,7 +95,10 @@ async def search_user(message: Message):
     result += format_block("🇨🇳 Китайские разборы\n", kit_rows)
     result += format_block("🇯🇵 Японские разборы\n", yap_rows)
 
-    await message.answer(result, parse_mode="Markdown")
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(KeyboardButton("🔎 Найти ещё раз"))
+
+    await message.answer(result, parse_mode="HTML", reply_markup=keyboard)
 
 
 if __name__ == "__main__":
