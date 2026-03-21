@@ -46,16 +46,12 @@ async def ask_username(message: Message):
 # поиск
 @dp.message_handler()
 async def search_user(message: Message):
-    text = message.text.strip().lower()
-
-    if not text.startswith("@"):
-        await message.answer("Пожалуйста, отправь username в формате @username")
-        return
+    text = message.text.replace("@", "").lower().strip()
 
     def get_data(sheet):
         return [
             row for row in sheet.get_all_records()
-            if row["Ник в тг"].lower().strip() == text
+            if row["Ник в тг"].replace("@", "").lower().strip() == text
         ]
 
     kor_rows = get_data(sheet_kor)
@@ -68,36 +64,38 @@ async def search_user(message: Message):
 
     result = "📦 Твои разборы:\n\n"
 
-    def format_block(title, rows):
-        if not rows:
-            return ""
+   def format_block(title, rows):
+    if not rows:
+        return ""
 
-        grouped = defaultdict(list)
+    grouped = defaultdict(list)
 
-        for row in rows:
-            grouped[row["Номер разбора"]].append(row)
+    for row in rows:
+        grouped[row["Номер разбора"]].append(row)
 
-        text_block = f"{title}\n"
+    text_block = f"{title}\n────────────\n\n"
 
-        for box, items in grouped.items():
-            text_block += f"{box}\n"
+    for box, items in grouped.items():
+        text_block += f"📦 {box}\n"
 
-            for item in items:
-                text_block += f"— {item['Название позиции']}\n"
-                text_block += f"Статус: {item['Статус']}\n"
+        for item in items:
+            text_block += f"🛍 {item['Название позиции']}\n"
+            text_block += f"📍 Статус: {item['Статус']}\n"
 
-                if item["Примечания"]:
-                    text_block += f"Примечание: {item['Примечания']}\n"
+            if item["Примечания"]:
+                text_block += f"💬 {item['Примечания']}\n"
 
-                text_block += "\n"
+            text_block += "\n"
 
-        return text_block
+        text_block += "────────────\n\n"
+
+    return text_block
 
     result += format_block("🇰🇷 Корейские разборы\n", kor_rows)
     result += format_block("🇨🇳 Китайские разборы\n", kit_rows)
     result += format_block("🇯🇵 Японские разборы\n", yap_rows)
 
-    await message.answer(result)
+    await message.answer(result, parse_mode="Markdown")
 
 
 if __name__ == "__main__":
