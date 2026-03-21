@@ -9,7 +9,6 @@ from aiogram.utils import executor
 
 API_TOKEN = os.environ["BOT_TOKEN"]
 
-# 👉 ВСТАВЬ СВОЙ USERNAME БЕЗ @
 ADMIN_ID = 635801439
 
 bot = Bot(token=API_TOKEN)
@@ -25,40 +24,41 @@ sheet_kor = spreadsheet.worksheet("Корейские Разборы")
 sheet_kit = spreadsheet.worksheet("Китайские Разборы")
 sheet_yap = spreadsheet.worksheet("Японские Разборы")
 
-# 📦 база пользователей (кто писал боту)
+# 📦 база пользователей
 users = {}
 
-# кнопки
-main_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-main_keyboard.add(KeyboardButton("🔍 Где мои разборы?"))
+# 🔥 ЕДИНАЯ КЛАВИАТУРА
+def get_keyboard(is_admin=False):
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
 
-admin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-admin_keyboard.add(KeyboardButton("📢 Разослать обновление"))
-admin_keyboard.add(KeyboardButton("👥 Список пользователей"))
+    keyboard.add(KeyboardButton("🔍 Где мои разборы?"))
 
+    if is_admin:
+        keyboard.row(
+            KeyboardButton("📢 Разослать обновление"),
+            KeyboardButton("👥 Список пользователей")
+        )
+
+    return keyboard
+
+# отдельная кнопка после рассылки
 check_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
 check_keyboard.add(KeyboardButton("📦 Проверить статус"))
 
 # старт
 @dp.message_handler(commands=['start'])
 async def start(message: Message):
-    username = message.from_user.username
-
     users[message.from_user.id] = message.from_user.username
 
-    if message.from_user.id == ADMIN_ID:
-        await message.answer(
-            "Ты админ 👑",
-            reply_markup=admin_keyboard
-        )
-    else:
-        await message.answer(
-            "Привет! Я бот для отслеживания статуса ваших разборов 📦\n\n"
-            "Нажми кнопку ниже 👇",
-            reply_markup=main_keyboard
-        )
+    is_admin = message.from_user.id == ADMIN_ID
 
-# админ кнопка
+    await message.answer(
+        "Привет! Я бот для отслеживания статуса ваших разборов 📦\n\n"
+        "Нажми кнопку ниже 👇",
+        reply_markup=get_keyboard(is_admin)
+    )
+
+# 🔔 рассылка
 @dp.message_handler(lambda message: message.text == "📢 Разослать обновление")
 async def notify_users(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -74,16 +74,19 @@ async def notify_users(message: Message):
                 text="📢 Есть обновления в таблице!\n\nПроверь статус своих разборов 👇",
                 reply_markup=check_keyboard
             )
+            success += 1
         except:
-            pass
+            failed += 1
 
     await message.answer(
         f"📊 <b>Рассылка завершена</b>\n\n"
         f"✅ Отправлено: {success}\n"
         f"❌ Ошибки: {failed}",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=get_keyboard(True)
     )
-    
+
+# 👥 список пользователей
 @dp.message_handler(lambda message: message.text == "👥 Список пользователей")
 async def show_users(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -103,14 +106,9 @@ async def show_users(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
-# кнопка проверки
-@dp.message_handler(lambda message: message.text == "📦 Проверить статус")
+# кнопки поиска
+@dp.message_handler(lambda message: message.text in ["📦 Проверить статус", "🔍 Где мои разборы?"])
 async def ask_username(message: Message):
-    await message.answer("Отправь свой username (например teplo или @teplo)")
-
-# старая кнопка
-@dp.message_handler(lambda message: message.text == "🔍 Где мои разборы?")
-async def ask_username2(message: Message):
     await message.answer("Отправь свой username (например teplo или @teplo)")
 
 # поиск
@@ -165,7 +163,11 @@ async def search_user(message: Message):
     result += format_block("🇨🇳 Китайские разборы\n", kit_rows)
     result += format_block("🇯🇵 Японские разборы\n", yap_rows)
 
-    await message.answer(result, parse_mode="HTML")
+    await message.answer(
+        result,
+        parse_mode="HTML",
+        reply_markup=get_keyboard(message.from_user.id == ADMIN_ID)
+    )
 
 
 if __name__ == "__main__":
