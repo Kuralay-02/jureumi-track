@@ -45,6 +45,19 @@ def get_keyboard(is_admin=False):
 check_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
 check_keyboard.add(KeyboardButton("📦 Проверить статус"))
 
+# ✅ НОВОЕ — безопасная отправка длинных сообщений
+async def send_long_message(message, text, keyboard):
+    max_length = 4000
+
+    for i in range(0, len(text), max_length):
+        chunk = text[i:i + max_length]
+
+        await message.answer(
+            chunk,
+            parse_mode="HTML",
+            reply_markup=keyboard if i == 0 else None
+        )
+
 # старт
 @dp.message_handler(commands=['start'])
 async def start(message: Message):
@@ -163,12 +176,12 @@ async def search_user(message: Message):
     result += format_block("🇨🇳 Китайские разборы\n", kit_rows)
     result += format_block("🇯🇵 Японские разборы\n", yap_rows)
 
-    await message.answer(
+    # 🔥 ВАЖНО — используем новую функцию
+    await send_long_message(
+        message,
         result,
-        parse_mode="HTML",
-        reply_markup=get_keyboard(message.from_user.id == ADMIN_ID)
+        get_keyboard(message.from_user.id == ADMIN_ID)
     )
-
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
