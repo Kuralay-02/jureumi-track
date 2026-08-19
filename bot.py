@@ -25,17 +25,11 @@ dp = Dispatcher(bot)
 
 CACHE_SECONDS = 300  # 5 минут
 
-BOXES_SPREADSHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1rOSfytA_8YhPGSYbMCCk8lVTydhwQrRqXMkif3L00x0/"
-    "edit?usp=sharing"
-)
+# Таблица с разборами — ссылка берётся из Railway Variables
+BOXES_SPREADSHEET_URL = os.environ["TRACK_SPREADSHEET_URL"]
 
-USERS_SPREADSHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "11WQBVHNEnmfi2_XaFxZrBTr_o5OeDPcC8yYSnPoe6JI/"
-    "edit?usp=sharing"
-)
+# Таблица пользователей — ссылка берётся из Railway Variables
+USERS_SPREADSHEET_URL = os.environ["USERS_SPREADSHEET_URL"]
 
 
 # =========================================================
