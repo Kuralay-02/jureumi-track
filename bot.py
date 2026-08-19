@@ -81,11 +81,9 @@ def read_sheet_records(sheet):
         except APIError as e:
             print(f"Ошибка Google Sheets: {e}")
 
-            # Если это последняя попытка — отдаём ошибку выше
             if attempt == attempts - 1:
                 raise
 
-            # 429 обычно временная ошибка лимита
             time.sleep(3 * (attempt + 1))
 
     return []
@@ -109,7 +107,6 @@ async def refresh_boxes_cache(force=False):
 
     async with boxes_cache_lock:
 
-        # Пока ждали lock, другой запрос уже мог обновить кэш
         now = time.monotonic()
 
         if (
@@ -153,8 +150,6 @@ async def refresh_boxes_cache(force=False):
         except Exception as e:
             print(f"Не удалось обновить кэш разборов: {e}")
 
-            # Если старые данные уже были —
-            # бот продолжит работать с ними
             return bool(
                 boxes_cache["kor"]
                 or boxes_cache["kit"]
@@ -172,11 +167,16 @@ users_lock = asyncio.Lock()
 
 
 def read_users_from_sheet():
+    """
+    Читает актуальный список пользователей из таблицы.
+    """
+
     users = {}
 
     rows = read_sheet_records(users_sheet)
 
     for row in rows:
+
         user_id = row.get("Telegram ID")
         username = row.get("Username", "")
 
@@ -185,32 +185,33 @@ def read_users_from_sheet():
 
         try:
             user_id = int(user_id)
+
         except (ValueError, TypeError):
             continue
 
-        users[user_id] = str(username or "").strip()
+        users[user_id] = str(
+            username or ""
+        ).strip()
 
     return users
 
 
-async def ensure_users_loaded():
+async def refresh_users():
     """
-    Загружает список пользователей из Google только один раз
-    после запуска бота.
+    ПРИНУДИТЕЛЬНО перечитывает актуальный список
+    пользователей из Google Sheets.
+
+    Используется перед рассылкой и перед показом
+    списка пользователей.
     """
 
-    global users_loaded
     global users_cache
-
-    if users_loaded:
-        return True
+    global users_loaded
 
     async with users_lock:
 
-        if users_loaded:
-            return True
-
         try:
+
             loaded_users = await asyncio.to_thread(
                 read_users_from_sheet
             )
@@ -219,21 +220,42 @@ async def ensure_users_loaded():
             users_loaded = True
 
             print(
-                f"Загружено пользователей: "
+                "Список пользователей обновлён: "
                 f"{len(users_cache)}"
             )
 
             return True
 
         except Exception as e:
+
             print(
-                f"Ошибка загрузки пользователей: {e}"
+                "Ошибка обновления списка "
+                f"пользователей: {e}"
             )
 
             return False
 
 
+async def ensure_users_loaded():
+    """
+    Для обычной работы загружает пользователей
+    только при необходимости.
+
+    Перед рассылкой и просмотром списка используется
+    refresh_users(), поэтому там всегда свежие данные.
+    """
+
+    global users_loaded
+    global users_cache
+
+    if users_loaded:
+        return True
+
+    return await refresh_users()
+
+
 def append_user_to_sheet(user_id, username):
+
     users_sheet.append_row(
         [str(user_id), username],
         value_input_option="USER_ENTERED"
@@ -242,33 +264,40 @@ def append_user_to_sheet(user_id, username):
 
 def update_username_in_sheet(user_id, username):
     """
-    Ищет строку конкретного ID только тогда,
-    когда username действительно изменился.
-    Это происходит редко.
+    Обновляет username существующего Telegram ID.
     """
 
     values = users_sheet.get_all_values()
 
-    for row_number, row in enumerate(values[1:], start=2):
+    for row_number, row in enumerate(
+        values[1:],
+        start=2
+    ):
 
         if not row:
             continue
 
-        existing_id = str(row[0]).strip()
+        existing_id = str(
+            row[0]
+        ).strip()
 
         if existing_id == str(user_id):
+
             users_sheet.update_cell(
                 row_number,
                 2,
                 username
             )
+
             return
 
 
 async def save_user(user_id, username):
     """
-    Сохраняет пользователя без чтения всей таблицы
-    при каждом сообщении.
+    Сохраняет нового пользователя.
+
+    Если пользователь уже есть — дубль не создаёт.
+    Если username изменился — обновляет его.
     """
 
     username = username or ""
@@ -278,9 +307,12 @@ async def save_user(user_id, username):
     if not loaded:
         return
 
-    existing_username = users_cache.get(user_id)
+    existing_username = users_cache.get(
+        user_id
+    )
 
-    # Уже есть и username не изменился
+    # Пользователь уже есть,
+    # username не изменился
     if (
         user_id in users_cache
         and existing_username == username
@@ -291,6 +323,7 @@ async def save_user(user_id, username):
     if user_id not in users_cache:
 
         try:
+
             await asyncio.to_thread(
                 append_user_to_sheet,
                 user_id,
@@ -305,8 +338,9 @@ async def save_user(user_id, username):
             )
 
         except Exception as e:
+
             print(
-                f"Ошибка сохранения пользователя "
+                "Ошибка сохранения пользователя "
                 f"{user_id}: {e}"
             )
 
@@ -314,6 +348,7 @@ async def save_user(user_id, username):
 
     # Пользователь поменял username
     try:
+
         await asyncio.to_thread(
             update_username_in_sheet,
             user_id,
@@ -323,13 +358,14 @@ async def save_user(user_id, username):
         users_cache[user_id] = username
 
         print(
-            f"Обновлён username пользователя "
+            "Обновлён username пользователя "
             f"{user_id}: @{username}"
         )
 
     except Exception as e:
+
         print(
-            f"Ошибка обновления username "
+            "Ошибка обновления username "
             f"{user_id}: {e}"
         )
 
@@ -345,13 +381,20 @@ def get_keyboard(is_admin=False):
     )
 
     keyboard.add(
-        KeyboardButton("🔍 Где мои разборы?")
+        KeyboardButton(
+            "🔍 Где мои разборы?"
+        )
     )
 
     if is_admin:
+
         keyboard.row(
-            KeyboardButton("📢 Разослать обновление"),
-            KeyboardButton("👥 Список пользователей")
+            KeyboardButton(
+                "📢 Разослать обновление"
+            ),
+            KeyboardButton(
+                "👥 Список пользователей"
+            )
         )
 
     return keyboard
@@ -362,7 +405,9 @@ check_keyboard = ReplyKeyboardMarkup(
 )
 
 check_keyboard.add(
-    KeyboardButton("📦 Проверить статус")
+    KeyboardButton(
+        "📦 Проверить статус"
+    )
 )
 
 
@@ -370,7 +415,11 @@ check_keyboard.add(
 # ДЛИННЫЕ СООБЩЕНИЯ
 # =========================================================
 
-async def send_long_message(message, blocks, keyboard):
+async def send_long_message(
+    message,
+    blocks,
+    keyboard
+):
 
     max_length = 3900
 
@@ -382,7 +431,9 @@ async def send_long_message(message, blocks, keyboard):
         if len(block) > max_length:
 
             if current_chunk:
-                chunks.append(current_chunk)
+                chunks.append(
+                    current_chunk
+                )
                 current_chunk = ""
 
             lines = block.split("\n")
@@ -390,10 +441,13 @@ async def send_long_message(message, blocks, keyboard):
 
             for line in lines:
 
-                line_with_break = line + "\n"
+                line_with_break = (
+                    line + "\n"
+                )
 
                 if (
-                    len(temp) + len(line_with_break)
+                    len(temp)
+                    + len(line_with_break)
                     > max_length
                 ):
 
@@ -411,12 +465,15 @@ async def send_long_message(message, blocks, keyboard):
             continue
 
         if (
-            len(current_chunk) + len(block)
+            len(current_chunk)
+            + len(block)
             > max_length
         ):
 
             if current_chunk:
-                chunks.append(current_chunk)
+                chunks.append(
+                    current_chunk
+                )
 
             current_chunk = block
 
@@ -424,9 +481,13 @@ async def send_long_message(message, blocks, keyboard):
             current_chunk += block
 
     if current_chunk:
-        chunks.append(current_chunk)
+        chunks.append(
+            current_chunk
+        )
 
-    for i, chunk in enumerate(chunks):
+    for i, chunk in enumerate(
+        chunks
+    ):
 
         await message.answer(
             chunk,
@@ -443,7 +504,9 @@ async def send_long_message(message, blocks, keyboard):
 # /START
 # =========================================================
 
-@dp.message_handler(commands=["start"])
+@dp.message_handler(
+    commands=["start"]
+)
 async def start(message: Message):
 
     await save_user(
@@ -452,14 +515,17 @@ async def start(message: Message):
     )
 
     is_admin = (
-        message.from_user.id == ADMIN_ID
+        message.from_user.id
+        == ADMIN_ID
     )
 
     await message.answer(
         "Привет! Я бот для отслеживания "
         "статуса ваших разборов 📦\n\n"
         "Нажми кнопку ниже 👇",
-        reply_markup=get_keyboard(is_admin)
+        reply_markup=get_keyboard(
+            is_admin
+        )
     )
 
 
@@ -469,42 +535,61 @@ async def start(message: Message):
 
 @dp.message_handler(
     lambda message:
-    message.text == "📢 Разослать обновление"
+    message.text
+    == "📢 Разослать обновление"
 )
-async def notify_users(message: Message):
+async def notify_users(
+    message: Message
+):
 
-    if message.from_user.id != ADMIN_ID:
+    if (
+        message.from_user.id
+        != ADMIN_ID
+    ):
         return
 
-    loaded = await ensure_users_loaded()
+    # ВАЖНО:
+    # непосредственно перед каждой рассылкой
+    # заново читаем таблицу пользователей.
+    loaded = await refresh_users()
 
     if not loaded:
+
         await message.answer(
             "⚠️ Сейчас не удалось получить "
-            "список пользователей из таблицы."
+            "актуальный список пользователей "
+            "из таблицы.",
+            reply_markup=get_keyboard(True)
         )
+
         return
 
     if not users_cache:
 
         await message.answer(
-            "Пользователей для рассылки пока нет.",
+            "Пользователей для рассылки "
+            "пока нет.",
             reply_markup=get_keyboard(True)
         )
+
         return
 
     success = 0
     failed = 0
 
-    for user_id in list(users_cache.keys()):
+    for user_id in list(
+        users_cache.keys()
+    ):
 
         try:
 
             await bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "📢 Есть обновления в таблице!\n\n"
-                    "Проверь статус своих разборов 👇"
+                    "📢 Есть обновления "
+                    "в таблице!\n\n"
+                    "Проверь статус своих "
+                    "разборов 👇"
                 ),
                 reply_markup=check_keyboard
             )
@@ -516,15 +601,15 @@ async def notify_users(message: Message):
             failed += 1
 
             print(
-                f"Не удалось отправить сообщение "
-                f"{user_id}: {e}"
+                "Не удалось отправить "
+                f"сообщение {user_id}: {e}"
             )
 
-        # Небольшая пауза, чтобы не долбить Telegram
+        # Небольшая пауза между сообщениями
         await asyncio.sleep(0.05)
 
     await message.answer(
-        f"📊 <b>Рассылка завершена</b>\n\n"
+        "📊 <b>Рассылка завершена</b>\n\n"
         f"👥 Всего пользователей: "
         f"{len(users_cache)}\n"
         f"✅ Получили: {success}\n"
@@ -540,21 +625,31 @@ async def notify_users(message: Message):
 
 @dp.message_handler(
     lambda message:
-    message.text == "👥 Список пользователей"
+    message.text
+    == "👥 Список пользователей"
 )
-async def show_users(message: Message):
+async def show_users(
+    message: Message
+):
 
-    if message.from_user.id != ADMIN_ID:
+    if (
+        message.from_user.id
+        != ADMIN_ID
+    ):
         return
 
-    loaded = await ensure_users_loaded()
+    # ВАЖНО:
+    # при каждом нажатии читаем таблицу заново.
+    loaded = await refresh_users()
 
     if not loaded:
 
         await message.answer(
             "⚠️ Сейчас не удалось загрузить "
-            "пользователей."
+            "актуальный список пользователей.",
+            reply_markup=get_keyboard(True)
         )
+
         return
 
     if not users_cache:
@@ -563,15 +658,21 @@ async def show_users(message: Message):
             "Список пользователей пуст.",
             reply_markup=get_keyboard(True)
         )
+
         return
 
     lines = [
-        f"👥 <b>Пользователи "
-        f"({len(users_cache)}):</b>",
+        (
+            f"👥 <b>Пользователи "
+            f"({len(users_cache)}):</b>"
+        ),
         ""
     ]
 
-    for i, (user_id, username) in enumerate(
+    for i, (
+        user_id,
+        username
+    ) in enumerate(
         users_cache.items(),
         start=1
     ):
@@ -600,11 +701,14 @@ async def show_users(message: Message):
         new_line = line + "\n"
 
         if (
-            len(current) + len(new_line)
+            len(current)
+            + len(new_line)
             > 3900
         ):
 
-            chunks.append(current)
+            if current:
+                chunks.append(current)
+
             current = new_line
 
         else:
@@ -613,7 +717,9 @@ async def show_users(message: Message):
     if current:
         chunks.append(current)
 
-    for i, chunk in enumerate(chunks):
+    for i, chunk in enumerate(
+        chunks
+    ):
 
         await message.answer(
             chunk,
@@ -637,7 +743,9 @@ async def show_users(message: Message):
         "🔍 Где мои разборы?"
     ]
 )
-async def ask_username(message: Message):
+async def ask_username(
+    message: Message
+):
 
     await message.answer(
         "Отправь свой username "
@@ -650,8 +758,12 @@ async def ask_username(message: Message):
 # =========================================================
 
 @dp.message_handler()
-async def search_user(message: Message):
+async def search_user(
+    message: Message
+):
 
+    # Если человек ещё не был сохранён —
+    # добавляем его в таблицу пользователей.
     await save_user(
         message.from_user.id,
         message.from_user.username
@@ -667,22 +779,26 @@ async def search_user(message: Message):
         .strip()
     )
 
-    # Получаем данные из кэша.
-    # Google читается максимум раз в 5 минут.
-    cache_available = await refresh_boxes_cache()
+    # Разборы по-прежнему кэшируются
+    # на 5 минут.
+    cache_available = (
+        await refresh_boxes_cache()
+    )
 
     if not cache_available:
 
         await message.answer(
-            "⚠️ Google Таблицы временно недоступны.\n\n"
-            "Попробуй проверить разборы чуть позже.",
+            "⚠️ Google Таблицы временно "
+            "недоступны.\n\n"
+            "Попробуй проверить разборы "
+            "чуть позже.",
             reply_markup=get_keyboard(
-                message.from_user.id == ADMIN_ID
+                message.from_user.id
+                == ADMIN_ID
             )
         )
 
         return
-
 
     def get_data(rows):
 
@@ -709,7 +825,6 @@ async def search_user(message: Message):
 
         return result
 
-
     kor_rows = get_data(
         boxes_cache["kor"]
     )
@@ -722,7 +837,6 @@ async def search_user(message: Message):
         boxes_cache["yap"]
     )
 
-
     if not (
         kor_rows
         or kit_rows
@@ -733,19 +847,21 @@ async def search_user(message: Message):
             "😔 Ничего не найдено\n\n"
             "Проверь правильность username",
             reply_markup=get_keyboard(
-                message.from_user.id == ADMIN_ID
+                message.from_user.id
+                == ADMIN_ID
             )
         )
 
         return
 
-
     blocks = [
         "📦 <b>ТВОИ РАЗБОРЫ</b>\n\n"
     ]
 
-
-    def format_blocks(title, rows):
+    def format_blocks(
+        title,
+        rows
+    ):
 
         if not rows:
             return []
@@ -763,14 +879,14 @@ async def search_user(message: Message):
 
             grouped[box].append(row)
 
-
         result_blocks = [
             f"{title}\n"
             f"────────────\n\n"
         ]
 
-
-        for box, items in grouped.items():
+        for box, items in (
+            grouped.items()
+        ):
 
             safe_box = html.escape(
                 str(box)
@@ -779,7 +895,6 @@ async def search_user(message: Message):
             text_block = (
                 f"📦 <b>{safe_box}</b>\n"
             )
-
 
             for item in items:
 
@@ -810,7 +925,6 @@ async def search_user(message: Message):
                     )
                 )
 
-
                 text_block += (
                     f"• <b>{name}</b>\n"
                 )
@@ -819,16 +933,13 @@ async def search_user(message: Message):
                     f"   └ 📍 {status}\n"
                 )
 
-
                 if note:
 
                     text_block += (
                         f"   └ 💬 {note}\n"
                     )
 
-
                 text_block += "\n"
-
 
             text_block += (
                 "────────────\n\n"
@@ -838,9 +949,7 @@ async def search_user(message: Message):
                 text_block
             )
 
-
         return result_blocks
-
 
     blocks += format_blocks(
         "🇰🇷 <b>Корейские разборы</b>",
@@ -857,12 +966,12 @@ async def search_user(message: Message):
         yap_rows
     )
 
-
     await send_long_message(
         message,
         blocks,
         get_keyboard(
-            message.from_user.id == ADMIN_ID
+            message.from_user.id
+            == ADMIN_ID
         )
     )
 
