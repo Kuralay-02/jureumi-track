@@ -1,19 +1,42 @@
 from collections import defaultdict
+import asyncio
+import html
 import json
 import os
-import html
+import time
 
 import gspread
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
+from gspread.exceptions import APIError
+
 
 API_TOKEN = os.environ["BOT_TOKEN"]
-
 ADMIN_ID = 635801439
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
+
+
+# =========================================================
+# НАСТРОЙКИ
+# =========================================================
+
+CACHE_SECONDS = 300  # 5 минут
+
+BOXES_SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1rOSfytA_8YhPGSYbMCCk8lVTydhwQrRqXMkif3L00x0/"
+    "edit?usp=sharing"
+)
+
+USERS_SPREADSHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "11WQBVHNEnmfi2_XaFxZrBTr_o5OeDPcC8yYSnPoe6JI/"
+    "edit?usp=sharing"
+)
+
 
 # =========================================================
 # GOOGLE SHEETS
@@ -22,115 +45,299 @@ dp = Dispatcher(bot)
 creds_dict = json.loads(os.environ["CREDS_JSON"])
 gc = gspread.service_account_from_dict(creds_dict)
 
-# Таблица с разборами
-spreadsheet = gc.open_by_url(
-    "https://docs.google.com/spreadsheets/d/1rOSfytA_8YhPGSYbMCCk8lVTydhwQrRqXMkif3L00x0/edit?usp=sharing"
-)
+spreadsheet = gc.open_by_url(BOXES_SPREADSHEET_URL)
 
 sheet_kor = spreadsheet.worksheet("Корейские Разборы")
 sheet_kit = spreadsheet.worksheet("Китайские Разборы")
 sheet_yap = spreadsheet.worksheet("Японские Разборы")
 
-
-# Отдельная таблица пользователей
-users_spreadsheet = gc.open_by_url(
-    "https://docs.google.com/spreadsheets/d/11WQBVHNEnmfi2_XaFxZrBTr_o5OeDPcC8yYSnPoe6JI/edit?usp=sharing"
-)
-
+users_spreadsheet = gc.open_by_url(USERS_SPREADSHEET_URL)
 users_sheet = users_spreadsheet.worksheet("Пользователи")
+
+
+# =========================================================
+# КЭШ РАЗБОРОВ
+# =========================================================
+
+boxes_cache = {
+    "kor": [],
+    "kit": [],
+    "yap": [],
+}
+
+boxes_cache_time = 0
+
+# Не даём нескольким пользователям одновременно
+# обновлять кэш из Google
+boxes_cache_lock = asyncio.Lock()
+
+
+def read_sheet_records(sheet):
+    """
+    Читает лист Google Sheets.
+    При 429 делает несколько попыток.
+    """
+
+    attempts = 3
+
+    for attempt in range(attempts):
+        try:
+            return sheet.get_all_records()
+
+        except APIError as e:
+            print(f"Ошибка Google Sheets: {e}")
+
+            # Если это последняя попытка — отдаём ошибку выше
+            if attempt == attempts - 1:
+                raise
+
+            # 429 обычно временная ошибка лимита
+            time.sleep(3 * (attempt + 1))
+
+    return []
+
+
+async def refresh_boxes_cache(force=False):
+    """
+    Загружает три листа разборов максимум раз в 5 минут.
+    """
+
+    global boxes_cache_time
+
+    now = time.monotonic()
+
+    if (
+        not force
+        and boxes_cache_time
+        and now - boxes_cache_time < CACHE_SECONDS
+    ):
+        return True
+
+    async with boxes_cache_lock:
+
+        # Пока ждали lock, другой запрос уже мог обновить кэш
+        now = time.monotonic()
+
+        if (
+            not force
+            and boxes_cache_time
+            and now - boxes_cache_time < CACHE_SECONDS
+        ):
+            return True
+
+        try:
+            kor = await asyncio.to_thread(
+                read_sheet_records,
+                sheet_kor
+            )
+
+            kit = await asyncio.to_thread(
+                read_sheet_records,
+                sheet_kit
+            )
+
+            yap = await asyncio.to_thread(
+                read_sheet_records,
+                sheet_yap
+            )
+
+            boxes_cache["kor"] = kor
+            boxes_cache["kit"] = kit
+            boxes_cache["yap"] = yap
+
+            boxes_cache_time = time.monotonic()
+
+            print(
+                "Кэш разборов обновлён: "
+                f"Корея {len(kor)}, "
+                f"Китай {len(kit)}, "
+                f"Япония {len(yap)}"
+            )
+
+            return True
+
+        except Exception as e:
+            print(f"Не удалось обновить кэш разборов: {e}")
+
+            # Если старые данные уже были —
+            # бот продолжит работать с ними
+            return bool(
+                boxes_cache["kor"]
+                or boxes_cache["kit"]
+                or boxes_cache["yap"]
+            )
 
 
 # =========================================================
 # ПОЛЬЗОВАТЕЛИ
 # =========================================================
 
-def get_users():
-    """
-    Получаем всех пользователей из таблицы.
-    Возвращает:
-    {
-        telegram_id: username
-    }
-    """
+users_cache = {}
+users_loaded = False
+users_lock = asyncio.Lock()
 
+
+def read_users_from_sheet():
     users = {}
 
-    try:
-        rows = users_sheet.get_all_records()
+    rows = read_sheet_records(users_sheet)
 
-        for row in rows:
-            user_id = row.get("Telegram ID")
-            username = row.get("Username", "")
+    for row in rows:
+        user_id = row.get("Telegram ID")
+        username = row.get("Username", "")
 
-            if not user_id:
-                continue
+        if not user_id:
+            continue
 
-            try:
-                user_id = int(user_id)
-            except (ValueError, TypeError):
-                continue
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            continue
 
-            users[user_id] = str(username or "").strip()
-
-    except Exception as e:
-        print(f"Ошибка чтения пользователей: {e}")
+        users[user_id] = str(username or "").strip()
 
     return users
 
 
-def save_user(user_id, username):
+async def ensure_users_loaded():
     """
-    Добавляет нового пользователя.
-    Если Telegram ID уже существует —
-    обновляет username при необходимости.
+    Загружает список пользователей из Google только один раз
+    после запуска бота.
+    """
+
+    global users_loaded
+    global users_cache
+
+    if users_loaded:
+        return True
+
+    async with users_lock:
+
+        if users_loaded:
+            return True
+
+        try:
+            loaded_users = await asyncio.to_thread(
+                read_users_from_sheet
+            )
+
+            users_cache = loaded_users
+            users_loaded = True
+
+            print(
+                f"Загружено пользователей: "
+                f"{len(users_cache)}"
+            )
+
+            return True
+
+        except Exception as e:
+            print(
+                f"Ошибка загрузки пользователей: {e}"
+            )
+
+            return False
+
+
+def append_user_to_sheet(user_id, username):
+    users_sheet.append_row(
+        [str(user_id), username],
+        value_input_option="USER_ENTERED"
+    )
+
+
+def update_username_in_sheet(user_id, username):
+    """
+    Ищет строку конкретного ID только тогда,
+    когда username действительно изменился.
+    Это происходит редко.
+    """
+
+    values = users_sheet.get_all_values()
+
+    for row_number, row in enumerate(values[1:], start=2):
+
+        if not row:
+            continue
+
+        existing_id = str(row[0]).strip()
+
+        if existing_id == str(user_id):
+            users_sheet.update_cell(
+                row_number,
+                2,
+                username
+            )
+            return
+
+
+async def save_user(user_id, username):
+    """
+    Сохраняет пользователя без чтения всей таблицы
+    при каждом сообщении.
     """
 
     username = username or ""
 
-    try:
-        rows = users_sheet.get_all_values()
+    loaded = await ensure_users_loaded()
 
-        # Если таблица вообще пустая
-        if not rows:
-            users_sheet.append_row(
-                ["Telegram ID", "Username"],
-                value_input_option="USER_ENTERED"
+    if not loaded:
+        return
+
+    existing_username = users_cache.get(user_id)
+
+    # Уже есть и username не изменился
+    if (
+        user_id in users_cache
+        and existing_username == username
+    ):
+        return
+
+    # Новый пользователь
+    if user_id not in users_cache:
+
+        try:
+            await asyncio.to_thread(
+                append_user_to_sheet,
+                user_id,
+                username
             )
-            rows = [["Telegram ID", "Username"]]
 
-        # Ищем пользователя по Telegram ID
-        for row_number, row in enumerate(rows[1:], start=2):
+            users_cache[user_id] = username
 
-            if not row:
-                continue
+            print(
+                f"Добавлен пользователь: "
+                f"{user_id} @{username}"
+            )
 
-            existing_id = str(row[0]).strip()
+        except Exception as e:
+            print(
+                f"Ошибка сохранения пользователя "
+                f"{user_id}: {e}"
+            )
 
-            if existing_id == str(user_id):
+        return
 
-                existing_username = ""
+    # Пользователь поменял username
+    try:
+        await asyncio.to_thread(
+            update_username_in_sheet,
+            user_id,
+            username
+        )
 
-                if len(row) > 1:
-                    existing_username = str(row[1]).strip()
+        users_cache[user_id] = username
 
-                # Если username изменился — обновляем
-                if existing_username != username:
-                    users_sheet.update_cell(
-                        row_number,
-                        2,
-                        username
-                    )
-
-                return
-
-        # Если пользователя ещё нет
-        users_sheet.append_row(
-            [str(user_id), username],
-            value_input_option="USER_ENTERED"
+        print(
+            f"Обновлён username пользователя "
+            f"{user_id}: @{username}"
         )
 
     except Exception as e:
-        print(f"Ошибка сохранения пользователя {user_id}: {e}")
+        print(
+            f"Ошибка обновления username "
+            f"{user_id}: {e}"
+        )
 
 
 # =========================================================
@@ -138,6 +345,7 @@ def save_user(user_id, username):
 # =========================================================
 
 def get_keyboard(is_admin=False):
+
     keyboard = ReplyKeyboardMarkup(
         resize_keyboard=True
     )
@@ -155,7 +363,6 @@ def get_keyboard(is_admin=False):
     return keyboard
 
 
-# Отдельная кнопка после рассылки
 check_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
@@ -166,14 +373,10 @@ check_keyboard.add(
 
 
 # =========================================================
-# БЕЗОПАСНАЯ ОТПРАВКА ДЛИННЫХ СООБЩЕНИЙ
+# ДЛИННЫЕ СООБЩЕНИЯ
 # =========================================================
 
 async def send_long_message(message, blocks, keyboard):
-    """
-    Отправляет длинный результат несколькими сообщениями,
-    не разрывая HTML-теги посередине.
-    """
 
     max_length = 3900
 
@@ -182,7 +385,6 @@ async def send_long_message(message, blocks, keyboard):
 
     for block in blocks:
 
-        # Если один блок сам по себе слишком большой
         if len(block) > max_length:
 
             if current_chunk:
@@ -193,13 +395,19 @@ async def send_long_message(message, blocks, keyboard):
             temp = ""
 
             for line in lines:
+
                 line_with_break = line + "\n"
 
-                if len(temp) + len(line_with_break) > max_length:
+                if (
+                    len(temp) + len(line_with_break)
+                    > max_length
+                ):
+
                     if temp:
                         chunks.append(temp)
 
                     temp = line_with_break
+
                 else:
                     temp += line_with_break
 
@@ -208,7 +416,10 @@ async def send_long_message(message, blocks, keyboard):
 
             continue
 
-        if len(current_chunk) + len(block) > max_length:
+        if (
+            len(current_chunk) + len(block)
+            > max_length
+        ):
 
             if current_chunk:
                 chunks.append(current_chunk)
@@ -226,7 +437,11 @@ async def send_long_message(message, blocks, keyboard):
         await message.answer(
             chunk,
             parse_mode="HTML",
-            reply_markup=keyboard if i == len(chunks) - 1 else None
+            reply_markup=(
+                keyboard
+                if i == len(chunks) - 1
+                else None
+            )
         )
 
 
@@ -237,18 +452,18 @@ async def send_long_message(message, blocks, keyboard):
 @dp.message_handler(commands=["start"])
 async def start(message: Message):
 
-    # Сохраняем пользователя в таблицу
-    save_user(
+    await save_user(
         message.from_user.id,
         message.from_user.username
     )
 
-    is_admin = message.from_user.id == ADMIN_ID
+    is_admin = (
+        message.from_user.id == ADMIN_ID
+    )
 
-    # Админ получает то же приветствие,
-    # просто с дополнительными кнопками
     await message.answer(
-        "Привет! Я бот для отслеживания статуса ваших разборов 📦\n\n"
+        "Привет! Я бот для отслеживания "
+        "статуса ваших разборов 📦\n\n"
         "Нажми кнопку ниже 👇",
         reply_markup=get_keyboard(is_admin)
     )
@@ -267,9 +482,17 @@ async def notify_users(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    users = get_users()
+    loaded = await ensure_users_loaded()
 
-    if not users:
+    if not loaded:
+        await message.answer(
+            "⚠️ Сейчас не удалось получить "
+            "список пользователей из таблицы."
+        )
+        return
+
+    if not users_cache:
+
         await message.answer(
             "Пользователей для рассылки пока нет.",
             reply_markup=get_keyboard(True)
@@ -279,7 +502,7 @@ async def notify_users(message: Message):
     success = 0
     failed = 0
 
-    for user_id in users:
+    for user_id in list(users_cache.keys()):
 
         try:
 
@@ -303,9 +526,13 @@ async def notify_users(message: Message):
                 f"{user_id}: {e}"
             )
 
+        # Небольшая пауза, чтобы не долбить Telegram
+        await asyncio.sleep(0.05)
+
     await message.answer(
         f"📊 <b>Рассылка завершена</b>\n\n"
-        f"👥 Всего пользователей: {len(users)}\n"
+        f"👥 Всего пользователей: "
+        f"{len(users_cache)}\n"
         f"✅ Получили: {success}\n"
         f"❌ Не получили: {failed}",
         parse_mode="HTML",
@@ -326,40 +553,51 @@ async def show_users(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    users = get_users()
+    loaded = await ensure_users_loaded()
 
-    if not users:
+    if not loaded:
+
+        await message.answer(
+            "⚠️ Сейчас не удалось загрузить "
+            "пользователей."
+        )
+        return
+
+    if not users_cache:
 
         await message.answer(
             "Список пользователей пуст.",
             reply_markup=get_keyboard(True)
         )
-
         return
 
     lines = [
-        f"👥 <b>Пользователи ({len(users)}):</b>",
+        f"👥 <b>Пользователи "
+        f"({len(users_cache)}):</b>",
         ""
     ]
 
     for i, (user_id, username) in enumerate(
-        users.items(),
+        users_cache.items(),
         start=1
     ):
 
         if username:
-            safe_username = html.escape(username)
+
+            safe_username = html.escape(
+                username
+            )
 
             lines.append(
                 f"{i}. @{safe_username}"
             )
 
         else:
+
             lines.append(
                 f"{i}. ID: {user_id}"
             )
 
-    # Список тоже может быть длиннее лимита Telegram
     chunks = []
     current = ""
 
@@ -367,7 +605,10 @@ async def show_users(message: Message):
 
         new_line = line + "\n"
 
-        if len(current) + len(new_line) > 3900:
+        if (
+            len(current) + len(new_line)
+            > 3900
+        ):
 
             chunks.append(current)
             current = new_line
@@ -411,15 +652,13 @@ async def ask_username(message: Message):
 
 
 # =========================================================
-# ПОИСК РАЗБОРОВ
+# ПОИСК
 # =========================================================
 
 @dp.message_handler()
 async def search_user(message: Message):
 
-    # На всякий случай сохраняем человека,
-    # даже если он уже был в таблице
-    save_user(
+    await save_user(
         message.from_user.id,
         message.from_user.username
     )
@@ -434,14 +673,34 @@ async def search_user(message: Message):
         .strip()
     )
 
-    def get_data(sheet):
+    # Получаем данные из кэша.
+    # Google читается максимум раз в 5 минут.
+    cache_available = await refresh_boxes_cache()
+
+    if not cache_available:
+
+        await message.answer(
+            "⚠️ Google Таблицы временно недоступны.\n\n"
+            "Попробуй проверить разборы чуть позже.",
+            reply_markup=get_keyboard(
+                message.from_user.id == ADMIN_ID
+            )
+        )
+
+        return
+
+
+    def get_data(rows):
 
         result = []
 
-        for row in sheet.get_all_records():
+        for row in rows:
 
             username = str(
-                row.get("Ник в тг", "")
+                row.get(
+                    "Ник в тг",
+                    ""
+                )
             )
 
             normalized = (
@@ -457,9 +716,17 @@ async def search_user(message: Message):
         return result
 
 
-    kor_rows = get_data(sheet_kor)
-    kit_rows = get_data(sheet_kit)
-    yap_rows = get_data(sheet_yap)
+    kor_rows = get_data(
+        boxes_cache["kor"]
+    )
+
+    kit_rows = get_data(
+        boxes_cache["kit"]
+    )
+
+    yap_rows = get_data(
+        boxes_cache["yap"]
+    )
 
 
     if not (
@@ -478,9 +745,6 @@ async def search_user(message: Message):
 
         return
 
-
-    # Каждый раздел делаем отдельным блоком.
-    # Так HTML больше не разорвётся посередине тега.
 
     blocks = [
         "📦 <b>ТВОИ РАЗБОРЫ</b>\n\n"
@@ -563,6 +827,7 @@ async def search_user(message: Message):
 
 
                 if note:
+
                     text_block += (
                         f"   └ 💬 {note}\n"
                     )
@@ -574,7 +839,6 @@ async def search_user(message: Message):
             text_block += (
                 "────────────\n\n"
             )
-
 
             result_blocks.append(
                 text_block
@@ -614,6 +878,7 @@ async def search_user(message: Message):
 # =========================================================
 
 if __name__ == "__main__":
+
     executor.start_polling(
         dp,
         skip_updates=True
