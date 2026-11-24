@@ -1,3 +1,9 @@
+from bot_io import (
+    LazyResource,
+    configure_client,
+    run_sheets,
+    telegram_call,
+)
 from collections import defaultdict
 import asyncio
 import html
@@ -37,16 +43,16 @@ USERS_SPREADSHEET_URL = os.environ["USERS_SPREADSHEET_URL"]
 # =========================================================
 
 creds_dict = json.loads(os.environ["CREDS_JSON"])
-gc = gspread.service_account_from_dict(creds_dict)
+gc = configure_client(gspread.service_account_from_dict(creds_dict))
 
-spreadsheet = gc.open_by_url(BOXES_SPREADSHEET_URL)
+spreadsheet = LazyResource(lambda: gc.open_by_url(BOXES_SPREADSHEET_URL))
 
-sheet_kor = spreadsheet.worksheet("Корейские Разборы")
-sheet_kit = spreadsheet.worksheet("Китайские Разборы")
-sheet_yap = spreadsheet.worksheet("Японские Разборы")
+sheet_kor = LazyResource(lambda: spreadsheet.worksheet("Корейские Разборы"))
+sheet_kit = LazyResource(lambda: spreadsheet.worksheet("Китайские Разборы"))
+sheet_yap = LazyResource(lambda: spreadsheet.worksheet("Японские Разборы"))
 
-users_spreadsheet = gc.open_by_url(USERS_SPREADSHEET_URL)
-users_sheet = users_spreadsheet.worksheet("Пользователи")
+users_spreadsheet = LazyResource(lambda: gc.open_by_url(USERS_SPREADSHEET_URL))
+users_sheet = LazyResource(lambda: users_spreadsheet.worksheet("Пользователи"))
 
 
 # =========================================================
@@ -89,12 +95,15 @@ def read_sheet_records(sheet):
     return []
 
 
+boxes_refresh_failed = False
+
+
 async def refresh_boxes_cache(force=False):
     """
     Загружает три листа разборов максимум раз в 5 минут.
     """
 
-    global boxes_cache_time
+    global boxes_cache_time, boxes_refresh_failed
 
     now = time.monotonic()
 
@@ -117,26 +126,18 @@ async def refresh_boxes_cache(force=False):
             return True
 
         try:
-            kor = await asyncio.to_thread(
-                read_sheet_records,
-                sheet_kor
-            )
+            kor = await run_sheets(read_sheet_records, sheet_kor)
 
-            kit = await asyncio.to_thread(
-                read_sheet_records,
-                sheet_kit
-            )
+            kit = await run_sheets(read_sheet_records, sheet_kit)
 
-            yap = await asyncio.to_thread(
-                read_sheet_records,
-                sheet_yap
-            )
+            yap = await run_sheets(read_sheet_records, sheet_yap)
 
             boxes_cache["kor"] = kor
             boxes_cache["kit"] = kit
             boxes_cache["yap"] = yap
 
             boxes_cache_time = time.monotonic()
+            boxes_refresh_failed = False
 
             print(
                 "Кэш разборов обновлён: "
@@ -148,6 +149,7 @@ async def refresh_boxes_cache(force=False):
             return True
 
         except Exception as e:
+            boxes_refresh_failed = True
             print(f"Не удалось обновить кэш разборов: {e}")
 
             return bool(
@@ -212,9 +214,7 @@ async def refresh_users():
 
         try:
 
-            loaded_users = await asyncio.to_thread(
-                read_users_from_sheet
-            )
+            loaded_users = await run_sheets(read_users_from_sheet)
 
             users_cache = loaded_users
             users_loaded = True
@@ -324,11 +324,7 @@ async def save_user(user_id, username):
 
         try:
 
-            await asyncio.to_thread(
-                append_user_to_sheet,
-                user_id,
-                username
-            )
+            await run_sheets(append_user_to_sheet, user_id, username)
 
             users_cache[user_id] = username
 
@@ -349,11 +345,7 @@ async def save_user(user_id, username):
     # Пользователь поменял username
     try:
 
-        await asyncio.to_thread(
-            update_username_in_sheet,
-            user_id,
-            username
-        )
+        await run_sheets(update_username_in_sheet, user_id, username)
 
         users_cache[user_id] = username
 
@@ -583,7 +575,8 @@ async def notify_users(
 
         try:
 
-            await bot.send_message(
+            await telegram_call(
+                bot.send_message,
                 chat_id=user_id,
                 text=(
                     "📢 Есть обновления "
@@ -591,7 +584,7 @@ async def notify_users(
                     "Проверь статус своих "
                     "разборов 👇"
                 ),
-                reply_markup=check_keyboard
+                reply_markup=check_keyboard,
             )
 
             success += 1
@@ -800,6 +793,11 @@ async def search_user(
 
         return
 
+    if boxes_refresh_failed:
+        await message.answer(
+            "Не удалось обновить таблицы. Ниже показаны данные последней успешной загрузки."
+        )
+
     def get_data(rows):
 
         result = []
@@ -980,9 +978,28 @@ async def search_user(
 # ЗАПУСК
 # =========================================================
 
+
+@dp.errors_handler()
+async def handle_bot_error(update, exception):
+    import logging
+
+    logging.error(
+        "Ошибка обработки сообщения",
+        exc_info=(type(exception), exception, exception.__traceback__),
+    )
+    message = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if message and message.chat.type == "private":
+        try:
+            await message.answer(
+                "Не удалось выполнить действие из-за технической ошибки. Попробуйте ещё раз через минуту."
+            )
+        except Exception:
+            logging.exception("Не удалось отправить сообщение об ошибке")
+    return True
+
+
 if __name__ == "__main__":
 
-    executor.start_polling(
-        dp,
-        skip_updates=True
-    )
+    executor.start_polling(dp, skip_updates=False)
